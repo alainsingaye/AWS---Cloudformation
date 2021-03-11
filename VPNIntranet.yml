@@ -1,0 +1,247 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  AWS Cloudformation Projet 10 OCR
+
+# La creation du VPC
+Parameters:
+  VpcCidrBlock:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: The main VPC CIDR Block
+Resources:
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock:  !Ref VpcCidrBlock
+      Tags:
+        - Key: Name
+          Value: 'VPNIntranet'
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: eu-west-1a
+      CidrBlock: !Select [ 100, !Cidr [ !GetAtt VPC.CidrBlock, 101, 8 ]]
+      Tags:
+        - Key: Name
+          Value: 'VPNIntranet-public-a'
+      VpcId: !Ref VPC
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: eu-west-1b
+      CidrBlock: !Select [ 101, !Cidr [ !GetAtt VPC.CidrBlock, 102, 8 ]]
+      Tags:
+        - Key: Name
+          Value: 'VPNIntranet-public-b'
+      VpcId: !Ref VPC
+
+
+# The Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: 'VPNIntranet-InternetGateway'
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  NatEipA:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  NatGatewayA:
+    DependsOn: AttachInternetGateway
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEipA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: VPNIntranet-nat-a
+
+# Route table
+  PublicRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: VPNIntranet-route-public-a
+  PublicRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: VPNIntranet-route-public-b
+  
+  AttachPublicRouteTableA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTableA
+      SubnetId: !Ref PublicSubnetA
+
+  AttachPublicRouteTableB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTableB
+      SubnetId: !Ref PublicSubnetB
+
+  PublicRouteA:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTableA
+
+  PublicRouteB:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTableB
+
+
+# Security Group
+
+  VPNIntranetEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: VPNIntranet EC2 security group
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC
+  
+    #Launch Config    
+    
+  VPNIntranetlaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      AssociatePublicIpAddress: true
+      ImageId: ami-0ea3405d2d2522162
+      InstanceType: t2.micro
+      KeyName: Goku
+      SecurityGroups:
+        - !Ref VPNIntranetEC2SecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo yum update -y
+          sudo amazon-linux-extras install docker
+          sudo yum install docker
+          sudo service docker start
+          sudo usermod -a -G docker ec2-user
+          docker info
+          sudo curl -L https://github.com/docker/compose/releases/download/1.22.0/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+          docker-compose version
+          sudo docker run -d -p 80:80 tutum/wordpress
+          sudo docker run -d –name=wp1 -p 80:80 -p 443:443 tutum/wordpress 
+          sudo docker ps
+          curl http://localhost/ 
+
+ 
+#Scalling Group
+  VPNIntranetScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref VPNIntranetlaunchConfig
+      AvailabilityZones:
+        - Fn::Select:
+          - 0
+          - Fn::GetAZs: !Ref AWS::Region
+        - Fn::Select:
+          - 1
+          - Fn::GetAZs: !Ref AWS::Region
+      VPCZoneIdentifier:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      DesiredCapacity: 1
+      MaxSize: 1
+      MinSize: 1
+      TargetGroupARNs:
+        - !Ref VPNIntranetTargetGroup
+    DependsOn:
+      - InternetGateway
+      
+# Target Group
+  VPNIntranetTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Port: 22
+      Port : 2375
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+
+  VPNIntranetLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref VPNIntranetLoadBalancerSecurityGroup
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+  VPNIntranetLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: VPNIntranet EC2 security group 
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 2375
+          ToPort: 2375
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC
+  VPNIntranetLoadBlancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref VPNIntranetLoadBalancer
+      Port: 80
+      Port: 22
+      Port: 2375
+      Protocol: HTTP
+      DefaultActions:
+         - Type: forward
+           TargetGroupArn: !Ref VPNIntranetTargetGroup
+
+  
+
+
+      
+
+
+
+
+
+  
